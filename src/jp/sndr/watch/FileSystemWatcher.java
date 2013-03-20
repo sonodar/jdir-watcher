@@ -2,8 +2,12 @@
 package jp.sndr.watch;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.file.FileSystem;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchEvent.Kind;
@@ -106,25 +110,22 @@ public class FileSystemWatcher extends Thread {
 	 * (非 Javadoc)
 	 * @see java.lang.Thread#run()
 	 */
+	@SuppressWarnings("rawtypes")
 	@Override
 	public void run() {
-		// FIXME 監視処理開始
 		try {
-			Path dirPath = this.watchPath;
-
 			// ディレクトリが属するファイルシステムを得る
-			FileSystem fs = dirPath.getFileSystem();
+			FileSystem fs = this.watchPath.getFileSystem();
 
 			// ファイルシステムに対応する監視サービスを構築する.
 			// (一つのサービスで複数の監視が可能)
 			try (WatchService watcher = fs.newWatchService()) {
 				// ディレクトリに対して監視サービスを登録する.
-				WatchKey watchKey = dirPath.register(watcher, new Kind[] {
+				WatchKey watchKey = this.watchPath.register(watcher, new Kind[] {
 								StandardWatchEventKinds.ENTRY_CREATE, // 作成
 								StandardWatchEventKinds.ENTRY_MODIFY, // 変更
-								StandardWatchEventKinds.ENTRY_DELETE, // 削除
-								StandardWatchEventKinds.OVERFLOW }, // 特定不能時
-								new Modifier[] {}); // オプションの修飾子、不要ならば空配列
+								StandardWatchEventKinds.ENTRY_DELETE // 削除
+				}, new Modifier[] {}); // オプションの修飾子、不要ならば空配列
 
 				// 監視が有効であるかぎり、ループする.
 				// (監視がcancelされるか、監視サービスが停止した場合はfalseとなる)
@@ -137,23 +138,22 @@ public class FileSystemWatcher extends Thread {
 
 						// ファイル変更イベントが発生するまで待機する.
 						WatchKey detecedtWatchKey = watcher.poll(500, TimeUnit.MILLISECONDS);
+
+						// タイムアウト
 						if (detecedtWatchKey == null) {
-							// タイムアウト
-							System.out.print(".");
 							continue;
 						}
-						System.out.println();
 
 						// イベント発生元を判定する
-						if (detecedtWatchKey.equals(watchKey)) {
-							// 発生したイベント内容をプリントする.
-							for (WatchEvent event: detecedtWatchKey.pollEvents()) {
-								// 追加・変更・削除対象のファイルを取得する.
-								// (ただし、overflow時などはnullとなることに注意)
-								Path file = (Path)event.context();
-								System.out.println(event.kind() + ": count=" + event.count()
-												+ ": path=" + file);
-							}
+						if (!detecedtWatchKey.equals(watchKey)) {
+							// イベントの受付を再開する.
+							detecedtWatchKey.reset();
+							continue;
+						}
+
+						// 発生したイベントを処理する.
+						for (WatchEvent event: detecedtWatchKey.pollEvents()) {
+							this.fire(event);
 						}
 
 						// イベントの受付を再開する.
@@ -162,7 +162,6 @@ public class FileSystemWatcher extends Thread {
 					}
 					catch (InterruptedException ex) {
 						// スレッドの割り込み = 終了要求なので監視をキャンセルしループを終了する.
-						System.out.println("監視のキャンセル");
 						watchKey.cancel();
 					}
 				}
@@ -170,6 +169,124 @@ public class FileSystemWatcher extends Thread {
 		}
 		catch (RuntimeException | IOException ex) {
 			this.interrupt();
+		}
+	}
+
+	/**
+	 * イベント実行処理.<br/>
+	 * イベントの種別によってListenerを実行する.
+	 * 
+	 * @param e {@link WatchEvent}
+	 * @throws IOException ファイル読み込みエラー
+	 */
+	@SuppressWarnings({ "rawtypes", "unchecked" })
+	private void fire(WatchEvent e) throws IOException {
+		if (e.kind().equals(StandardWatchEventKinds.ENTRY_CREATE)) {
+			this.fireCreatingEvent(e);
+			if (isWritable((Path)e.context())) {
+				this.fireCreatedEvent(e);
+			}
+		}
+		else if (e.kind().equals(StandardWatchEventKinds.ENTRY_MODIFY)) {
+			this.fireModifingEvent(e);
+			if (isWritable((Path)e.context())) {
+				this.fireModifiedEvent(e);
+			}
+
+		}
+		else if (e.kind().equals(StandardWatchEventKinds.ENTRY_DELETE)) {
+			this.fireDeletedEvent(e);
+		}
+		else {
+			throw new RuntimeException(e.kind().name() + ": unsupported kind."); //$NON-NLS-1$
+		}
+	}
+
+	/**
+	 * ファイルの排他ロック取得を試みて、ファイルが書き込み可能かどうかを判定する.
+	 * 
+	 * @param path ファイルパス
+	 * @return 書き込み可能ならtrue,他プロセスによって使用中ならfalse.
+	 * @throws IOException　ファイル読み込みエラー
+	 */
+	private static boolean isWritable(Path path) throws IOException {
+		try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
+			FileLock lock = channel.tryLock();
+			if (lock != null) {
+				lock.release();
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
+	 * ファイル作成時イベント実行処理.
+	 * 
+	 * @param e {@link WatchEvent}
+	 */
+	private void fireCreatingEvent(WatchEvent<Path> e) {
+		if (!Files.exists(e.context())) {
+			return;
+		}
+		for (WatchListener listener: this.listeners) {
+			listener.creating(e);
+		}
+	}
+
+	/**
+	 * ファイル作成完了時イベント実行処理.
+	 * 
+	 * @param e {@link WatchEvent}
+	 */
+	private void fireCreatedEvent(WatchEvent<Path> e) {
+		if (!Files.exists(e.context())) {
+			return;
+		}
+		for (WatchListener listener: this.listeners) {
+			listener.created(e);
+		}
+	}
+
+	/**
+	 * ファイル更新時イベント実行処理.
+	 * 
+	 * @param e {@link WatchEvent}
+	 */
+	private void fireModifingEvent(WatchEvent<Path> e) {
+		if (!Files.exists(e.context())) {
+			return;
+		}
+		for (WatchListener listener: this.listeners) {
+			listener.modifing(e);
+		}
+	}
+
+	/**
+	 * ファイル更新完了時イベント実行処理.
+	 * 
+	 * @param e {@link WatchEvent}
+	 */
+	private void fireModifiedEvent(WatchEvent<Path> e) {
+		if (!Files.exists(e.context())) {
+			return;
+		}
+		for (WatchListener listener: this.listeners) {
+			listener.modified(e);
+		}
+	}
+
+	/**
+	 * ファイル削除時イベント実行処理.
+	 * 
+	 * @param e {@link WatchEvent}
+	 */
+	private void fireDeletedEvent(WatchEvent<Path> e) {
+		if (Files.exists(e.context())) {
+			return;
+		}
+		for (WatchListener listener: this.listeners) {
+			listener.deleted(e);
 		}
 	}
 
