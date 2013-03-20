@@ -2,12 +2,9 @@
 package jp.sndr.watch;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchEvent.Kind;
@@ -20,7 +17,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * TODO .
+ * ディレクトリ監視スレッドクラス.
  * 
  * @author sonodar
  * @version 0.1 2013/02/27 新規作成 sonodar
@@ -32,6 +29,9 @@ public class FileSystemWatcher extends Thread {
 
 	/** 監視対象パス */
 	private Path				watchPath;
+
+	/** 再帰監視フラグ */
+	private boolean				recursive;
 
 	/**
 	 * 監視対象パスを指定してインスタンスを生成する.
@@ -118,8 +118,8 @@ public class FileSystemWatcher extends Thread {
 			FileSystem fs = this.watchPath.getFileSystem();
 
 			// ファイルシステムに対応する監視サービスを構築する.
-			// (一つのサービスで複数の監視が可能)
 			try (WatchService watcher = fs.newWatchService()) {
+
 				// ディレクトリに対して監視サービスを登録する.
 				WatchKey watchKey = this.watchPath.register(watcher, new Kind[] {
 								StandardWatchEventKinds.ENTRY_CREATE, // 作成
@@ -127,11 +127,10 @@ public class FileSystemWatcher extends Thread {
 								StandardWatchEventKinds.ENTRY_DELETE // 削除
 				}, new Modifier[] {}); // オプションの修飾子、不要ならば空配列
 
-				// 監視が有効であるかぎり、ループする.
-				// (監視がcancelされるか、監視サービスが停止した場合はfalseとなる)
+				// 監視が有効であるかぎりループする.
 				while (watchKey.isValid()) {
 					try {
-						// スレッドの割り込み = 終了要求を判定する.
+						// スレッドの割り込みは終了要求.
 						if (Thread.currentThread().isInterrupted()) {
 							throw new InterruptedException();
 						}
@@ -139,7 +138,7 @@ public class FileSystemWatcher extends Thread {
 						// ファイル変更イベントが発生するまで待機する.
 						WatchKey detecedtWatchKey = watcher.poll(500, TimeUnit.MILLISECONDS);
 
-						// タイムアウト
+						// 監視中に何もなければ次のループ
 						if (detecedtWatchKey == null) {
 							continue;
 						}
@@ -167,8 +166,13 @@ public class FileSystemWatcher extends Thread {
 				}
 			}
 		}
-		catch (RuntimeException | IOException ex) {
+		catch (IOException ex) {
 			this.interrupt();
+			throw new RuntimeException(ex);
+		}
+		catch (RuntimeException ex) {
+			this.interrupt();
+			throw ex;
 		}
 	}
 
@@ -182,20 +186,13 @@ public class FileSystemWatcher extends Thread {
 	@SuppressWarnings({ "rawtypes", "unchecked" })
 	private void fire(WatchEvent e) throws IOException {
 		if (e.kind().equals(StandardWatchEventKinds.ENTRY_CREATE)) {
-			this.fireCreatingEvent(e);
-			if (isWritable((Path)e.context())) {
-				this.fireCreatedEvent(e);
-			}
+			this.fireCreateEvent(e);
 		}
 		else if (e.kind().equals(StandardWatchEventKinds.ENTRY_MODIFY)) {
-			this.fireModifingEvent(e);
-			if (isWritable((Path)e.context())) {
-				this.fireModifiedEvent(e);
-			}
-
+			this.fireModifyEvent(e);
 		}
 		else if (e.kind().equals(StandardWatchEventKinds.ENTRY_DELETE)) {
-			this.fireDeletedEvent(e);
+			this.fireDeleteEvent(e);
 		}
 		else {
 			throw new RuntimeException(e.kind().name() + ": unsupported kind."); //$NON-NLS-1$
@@ -203,48 +200,16 @@ public class FileSystemWatcher extends Thread {
 	}
 
 	/**
-	 * ファイルの排他ロック取得を試みて、ファイルが書き込み可能かどうかを判定する.
-	 * 
-	 * @param path ファイルパス
-	 * @return 書き込み可能ならtrue,他プロセスによって使用中ならfalse.
-	 * @throws IOException　ファイル読み込みエラー
-	 */
-	private static boolean isWritable(Path path) throws IOException {
-		try (FileChannel channel = FileChannel.open(path, StandardOpenOption.WRITE)) {
-			FileLock lock = channel.tryLock();
-			if (lock != null) {
-				lock.release();
-				return true;
-			}
-		}
-		return false;
-	}
-
-	/**
 	 * ファイル作成時イベント実行処理.
 	 * 
 	 * @param e {@link WatchEvent}
 	 */
-	private void fireCreatingEvent(WatchEvent<Path> e) {
+	private void fireCreateEvent(WatchEvent<Path> e) {
 		if (!Files.exists(e.context())) {
 			return;
 		}
 		for (WatchListener listener: this.listeners) {
-			listener.creating(e);
-		}
-	}
-
-	/**
-	 * ファイル作成完了時イベント実行処理.
-	 * 
-	 * @param e {@link WatchEvent}
-	 */
-	private void fireCreatedEvent(WatchEvent<Path> e) {
-		if (!Files.exists(e.context())) {
-			return;
-		}
-		for (WatchListener listener: this.listeners) {
-			listener.created(e);
+			listener.create(e);
 		}
 	}
 
@@ -253,26 +218,12 @@ public class FileSystemWatcher extends Thread {
 	 * 
 	 * @param e {@link WatchEvent}
 	 */
-	private void fireModifingEvent(WatchEvent<Path> e) {
+	private void fireModifyEvent(WatchEvent<Path> e) {
 		if (!Files.exists(e.context())) {
 			return;
 		}
 		for (WatchListener listener: this.listeners) {
-			listener.modifing(e);
-		}
-	}
-
-	/**
-	 * ファイル更新完了時イベント実行処理.
-	 * 
-	 * @param e {@link WatchEvent}
-	 */
-	private void fireModifiedEvent(WatchEvent<Path> e) {
-		if (!Files.exists(e.context())) {
-			return;
-		}
-		for (WatchListener listener: this.listeners) {
-			listener.modified(e);
+			listener.modify(e);
 		}
 	}
 
@@ -281,23 +232,13 @@ public class FileSystemWatcher extends Thread {
 	 * 
 	 * @param e {@link WatchEvent}
 	 */
-	private void fireDeletedEvent(WatchEvent<Path> e) {
+	private void fireDeleteEvent(WatchEvent<Path> e) {
 		if (Files.exists(e.context())) {
 			return;
 		}
 		for (WatchListener listener: this.listeners) {
-			listener.deleted(e);
+			listener.delete(e);
 		}
-	}
-
-	/*
-	 * (非 Javadoc)
-	 * @see java.lang.Thread#interrupt()
-	 */
-	@Override
-	public void interrupt() {
-		// FIXME 監視処理中断
-		super.interrupt();
 	}
 
 	/**
@@ -319,6 +260,27 @@ public class FileSystemWatcher extends Thread {
 	 */
 	public Path getWatchPath() {
 		return this.watchPath;
+	}
+
+	/**
+	 * 再帰監視フラグを返す.<br/>
+	 * <i>再帰処理未実装.</i>
+	 * 
+	 * @return recursive 再帰監視フラグ
+	 */
+	public boolean isRecursive() {
+		return this.recursive;
+	}
+
+	/**
+	 * 再帰監視フラグを設定する.<br/>
+	 * <i>再帰処理未実装.</i>
+	 * 
+	 * @param recursive 設定する再帰監視フラグ
+	 */
+	@Deprecated
+	public void setRecursive(boolean recursive) {
+		this.recursive = recursive;
 	}
 
 }
