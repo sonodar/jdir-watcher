@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.nio.file.FileSystem;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.nio.file.StandardWatchEventKinds;
 import java.nio.file.WatchEvent;
 import java.nio.file.WatchEvent.Kind;
@@ -51,6 +52,25 @@ public class FileSystemWatcher extends Thread {
 	public FileSystemWatcher(Path watchPath, WatchListener listener) {
 		this.watchPath = watchPath;
 		this.addWatchListener(listener);
+	}
+
+	/**
+	 * 監視対象パスを指定してインスタンスを生成する.
+	 * 
+	 * @param watchPath 監視対象パス
+	 */
+	public FileSystemWatcher(String watchPath) {
+		this(Paths.get(watchPath));
+	}
+
+	/**
+	 * 監視対象パスと最初に実行されるイベントリスナを指定してインスタンスを生成する.
+	 * 
+	 * @param watchPath 監視対象パス
+	 * @param listener 最初に実行されるイベントリスナ
+	 */
+	public FileSystemWatcher(String watchPath, WatchListener listener) {
+		this(Paths.get(watchPath), listener);
 	}
 
 	/**
